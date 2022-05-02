@@ -1,6 +1,8 @@
 pragma solidity ^0.5.16;
 
+import "./CNftInterface.sol";
 import "./CToken.sol";
+import "./NftPriceOracle.sol";
 import "./PriceOracle.sol";
 
 contract UnitrollerAdminStorage {
@@ -142,4 +144,13 @@ contract ComptrollerV5Storage is ComptrollerV4Storage {
 
     /// @notice Last block at which a contributor's COMP rewards have been allocated
     mapping(address => uint) public lastContributorBlock;
+}
+
+contract ComptrollerNftStorage is ComptrollerV5Storage {
+    NftPriceOracle public nftOracle;
+
+    /// @notice The address of `nftMarket` is used to look up `markets`.
+    CNftInterface public nftMarket;
+
+    address public compAddress = 0xc00e94Cb662C3520282E6f5717214004A7f26888;
 }

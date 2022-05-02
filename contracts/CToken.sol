@@ -1,6 +1,7 @@
 pragma solidity ^0.5.16;
 
 import "./ComptrollerInterface.sol";
+import "./CNftInterface.sol";
 import "./CTokenInterfaces.sol";
 import "./ErrorReporter.sol";
 import "./Exponential.sol";
@@ -119,9 +120,6 @@ contract CToken is CTokenInterface, Exponential, TokenErrorReporter {
 
         /* We emit a Transfer event */
         emit Transfer(src, dst, tokens);
-
-        // unused function
-        // comptroller.transferVerify(address(this), src, dst, tokens);
 
         return uint(Error.NO_ERROR);
     }
@@ -554,10 +552,6 @@ contract CToken is CTokenInterface, Exponential, TokenErrorReporter {
         emit Mint(minter, vars.actualMintAmount, vars.mintTokens);
         emit Transfer(address(this), minter, vars.mintTokens);
 
-        /* We call the defense hook */
-        // unused function
-        // comptroller.mintVerify(address(this), minter, vars.actualMintAmount, vars.mintTokens);
-
         return (uint(Error.NO_ERROR), vars.actualMintAmount);
     }
 
@@ -793,10 +787,6 @@ contract CToken is CTokenInterface, Exponential, TokenErrorReporter {
         /* We emit a Borrow event */
         emit Borrow(borrower, borrowAmount, vars.accountBorrowsNew, vars.totalBorrowsNew);
 
-        /* We call the defense hook */
-        // unused function
-        // comptroller.borrowVerify(address(this), borrower, borrowAmount);
-
         return uint(Error.NO_ERROR);
     }
 
@@ -911,10 +901,6 @@ contract CToken is CTokenInterface, Exponential, TokenErrorReporter {
         /* We emit a RepayBorrow event */
         emit RepayBorrow(payer, borrower, vars.actualRepayAmount, vars.accountBorrowsNew, vars.totalBorrowsNew);
 
-        /* We call the defense hook */
-        // unused function
-        // comptroller.repayBorrowVerify(address(this), payer, borrower, vars.actualRepayAmount, vars.borrowerIndex);
-
         return (uint(Error.NO_ERROR), vars.actualRepayAmount);
     }
 
@@ -1016,9 +1002,101 @@ contract CToken is CTokenInterface, Exponential, TokenErrorReporter {
         /* We emit a LiquidateBorrow event */
         emit LiquidateBorrow(liquidator, borrower, actualRepayAmount, address(cTokenCollateral), seizeTokens);
 
-        /* We call the defense hook */
-        // unused function
-        // comptroller.liquidateBorrowVerify(address(this), address(cTokenCollateral), liquidator, borrower, actualRepayAmount, seizeTokens);
+        return (uint(Error.NO_ERROR), actualRepayAmount);
+    }
+
+    /**
+     * @notice The sender liquidates the borrowers collateral.
+     *  The collateral seized is transferred to the liquidator.
+     * @param borrower The borrower of this cToken to be liquidated
+     * @param repayAmount The amount of the underlying borrowed asset to repay
+     * @param cNftCollateral The market in which to seize collateral from the borrower
+     * @param seizeIds The IDs of the NFT to seize.
+     * @param seizeAmounts The amount of each ID of NFT to seize.
+     * @return (uint, uint) An error code (0=success, otherwise a failure, see ErrorReporter.sol), and the actual repayment amount.
+     */
+    function liquidateBorrowNftInternal(address borrower, uint repayAmount, CNftInterface cNftCollateral, uint[] memory seizeIds, uint[] memory seizeAmounts) internal nonReentrant returns (uint, uint) {
+        uint error = accrueInterest();
+        if (error != uint(Error.NO_ERROR)) {
+            // accrueInterest emits logs on errors, but we still want to log the fact that an attempted liquidation failed
+            return (fail(Error(error), FailureInfo.LIQUIDATE_ACCRUE_BORROW_INTEREST_FAILED), 0);
+        }
+
+        // liquidateBorrowFresh emits borrow-specific logs on errors, so we don't need to
+        return liquidateBorrowNftFresh(msg.sender, borrower, repayAmount, cNftCollateral, seizeIds, seizeAmounts);
+    }
+
+    /**
+     * @notice The liquidator liquidates the borrowers collateral.
+     *  The collateral seized is transferred to the liquidator.
+     *  It is the responsibility of the caller to specify the correct number of NFTs to be seized in `seizeIds` and `seizeAmounts`.
+     * @param borrower The borrower of this cToken to be liquidated
+     * @param liquidator The address repaying the borrow and seizing collateral
+     * @param repayAmount The amount of the underlying borrowed asset to repay
+     * @param cNftCollateral The market in which to seize collateral from the borrower
+     * @param seizeIds The IDs of the NFT to seize.
+     * @param seizeAmounts The amount of each ID of NFT to seize.
+     * @return (uint, uint) An error code (0=success, otherwise a failure, see ErrorReporter.sol), and the actual repayment amount.
+     */
+    function liquidateBorrowNftFresh(address liquidator, address borrower, uint repayAmount, CNftInterface cNftCollateral, uint[] memory seizeIds, uint[] memory seizeAmounts) internal returns (uint, uint) {
+        require(seizeIds.length == seizeAmounts.length, "SEIZE_IDS_SEIZE_AMOUNTS_MISMATCH");
+
+        /* Fail if liquidate not allowed */
+        uint allowed = comptroller.liquidateBorrowAllowed(address(this), address(cNftCollateral), liquidator, borrower, repayAmount);
+        if (allowed != 0) {
+            return (failOpaque(Error.COMPTROLLER_REJECTION, FailureInfo.LIQUIDATE_COMPTROLLER_REJECTION, allowed), 0);
+        }
+
+        /* Verify market's block number equals current block number */
+        if (accrualBlockNumber != getBlockNumber()) {
+            return (fail(Error.MARKET_NOT_FRESH, FailureInfo.LIQUIDATE_FRESHNESS_CHECK), 0);
+        }
+
+        /* Fail if borrower = liquidator */
+        if (borrower == liquidator) {
+            return (fail(Error.INVALID_ACCOUNT_PAIR, FailureInfo.LIQUIDATE_LIQUIDATOR_IS_BORROWER), 0);
+        }
+
+        /* Fail if repayAmount = 0 */
+        if (repayAmount == 0) {
+            return (fail(Error.INVALID_CLOSE_AMOUNT_REQUESTED, FailureInfo.LIQUIDATE_CLOSE_AMOUNT_IS_ZERO), 0);
+        }
+
+        /* Fail if repayAmount = -1 */
+        if (repayAmount == uint(-1)) {
+            return (fail(Error.INVALID_CLOSE_AMOUNT_REQUESTED, FailureInfo.LIQUIDATE_CLOSE_AMOUNT_IS_UINT_MAX), 0);
+        }
+
+
+        /* Fail if repayBorrow fails */
+        (uint repayBorrowError, uint actualRepayAmount) = repayBorrowFresh(liquidator, borrower, repayAmount);
+        if (repayBorrowError != uint(Error.NO_ERROR)) {
+            return (fail(Error(repayBorrowError), FailureInfo.LIQUIDATE_REPAY_BORROW_FRESH_FAILED), 0);
+        }
+
+        /////////////////////////
+        // EFFECTS & INTERACTIONS
+        // (No safe failures beyond this point)
+
+        /* We calculate the number of collateral tokens that will be seized */
+        (uint amountSeizeError, uint seizeTokens) = comptroller.liquidateCalculateSeizeNfts(address(this), address(cNftCollateral), actualRepayAmount);
+        require(amountSeizeError == uint(Error.NO_ERROR), "LIQUIDATE_COMPTROLLER_CALCULATE_AMOUNT_SEIZE_FAILED");
+
+        /* Revert if borrower collateral token balance < seizeTokens */
+        require(cNftCollateral.totalBalance(borrower) >= seizeTokens, "LIQUIDATE_SEIZE_DOES_NOT_MATCH");
+
+        /* Revert if seizeTokens is greater than the number of NFTs to seize specified */
+        uint length = seizeIds.length;
+        for (uint i; i < length; ++i) {
+            seizeTokens -= seizeAmounts[i];
+        }
+        require(seizeTokens == 0, "LIQUIDATE_SEIZE_INCORRECT_NUM_NFTS");
+
+        // If this is also the collateral, run seizeInternal to avoid re-entrancy, otherwise make an external call
+        cNftCollateral.seize(liquidator, borrower, seizeIds, seizeAmounts);
+
+        /* We emit a LiquidateBorrow event */
+        emit LiquidateBorrow(liquidator, borrower, actualRepayAmount, address(cNftCollateral), seizeTokens);
 
         return (uint(Error.NO_ERROR), actualRepayAmount);
     }
@@ -1112,10 +1190,6 @@ contract CToken is CTokenInterface, Exponential, TokenErrorReporter {
         emit Transfer(borrower, liquidator, vars.liquidatorSeizeTokens);
         emit Transfer(borrower, address(this), vars.protocolSeizeTokens);
         emit ReservesAdded(address(this), vars.protocolSeizeAmount, vars.totalReservesNew);
-
-        /* We call the defense hook */
-        // unused function
-        // comptroller.seizeVerify(address(this), seizerToken, liquidator, borrower, seizeTokens);
 
         return uint(Error.NO_ERROR);
     }

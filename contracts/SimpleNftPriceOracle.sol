@@ -1,22 +1,18 @@
+// SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.5.16;
 
-import "./PriceOracle.sol";
-import "./CErc20.sol";
+import "./NftPriceOracle.sol";
 
-contract SimplePriceOracle is PriceOracle {
+contract SimpleNftPriceOracle is NftPriceOracle {
     mapping(address => uint) prices;
     event PricePosted(address asset, uint previousPriceMantissa, uint requestedPriceMantissa, uint newPriceMantissa);
 
-    function getUnderlyingPrice(CToken cToken) public view returns (uint) {
-        if (compareStrings(cToken.symbol(), "bETH")) {
-            return 1e18;
-        } else {
-            return prices[address(CErc20(address(cToken)).underlying())] * 1e12;
-        }
+    function getUnderlyingPrice(CNftInterface cNft) public view returns (uint) {
+        return prices[address(cNft.underlying())];
     }
 
-    function setUnderlyingPrice(CToken cToken, uint underlyingPriceMantissa) public {
-        address asset = address(CErc20(address(cToken)).underlying());
+    function setUnderlyingPrice(CNftInterface cNft, uint underlyingPriceMantissa) public {
+        address asset = address(cNft.underlying());
         emit PricePosted(asset, prices[asset], underlyingPriceMantissa, underlyingPriceMantissa);
         prices[asset] = underlyingPriceMantissa;
     }

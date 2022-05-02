@@ -1,5 +1,6 @@
 pragma solidity ^0.5.16;
 
+import "./CNftInterface.sol";
 import "./CToken.sol";
 import "./ErrorReporter.sol";
 import "./PriceOracle.sol";
@@ -12,7 +13,7 @@ import "./Governance/Comp.sol";
  * @title Compound's Comptroller Contract
  * @author Compound
  */
-contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerErrorReporter, ExponentialNoError {
+contract Comptroller is ComptrollerNftStorage, ComptrollerInterface, ComptrollerErrorReporter, ExponentialNoError {
     /// @notice Emitted when an admin supports a market
     event MarketListed(CToken cToken);
 
@@ -27,6 +28,9 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
 
     /// @notice Emitted when a collateral factor is changed by admin
     event NewCollateralFactor(CToken cToken, uint oldCollateralFactorMantissa, uint newCollateralFactorMantissa);
+
+    /// @notice Emitted when the NFT collateral factor is changed by admin
+    event NewNftCollateralFactor(uint oldCollateralFactorMantissa, uint newCollateralFactorMantissa);
 
     /// @notice Emitted when liquidation incentive is changed by admin
     event NewLiquidationIncentive(uint oldLiquidationIncentiveMantissa, uint newLiquidationIncentiveMantissa);
@@ -216,66 +220,46 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
 
     /**
      * @notice Checks if the account should be allowed to mint tokens in the given market
-     * @param cToken The market to verify the mint against
+     * @param cAsset The market to verify the mint against
      * @param minter The account which would get the minted tokens
      * @param mintAmount The amount of underlying being supplied to the market in exchange for tokens
      * @return 0 if the mint is allowed, otherwise a semi-opaque error code (See ErrorReporter.sol)
      */
-    function mintAllowed(address cToken, address minter, uint mintAmount) external returns (uint) {
+    function mintAllowed(address cAsset, address minter, uint mintAmount) external returns (uint) {
         // Pausing is a very serious situation - we revert to sound the alarms
-        require(!mintGuardianPaused[cToken], "mint is paused");
+        require(!mintGuardianPaused[cAsset], "mint is paused");
 
         // Shh - currently unused
         minter;
         mintAmount;
 
-        if (!markets[cToken].isListed) {
+        if (!markets[cAsset].isListed) {
             return uint(Error.MARKET_NOT_LISTED);
         }
 
         // Keep the flywheel moving
-        updateCompSupplyIndex(cToken);
-        distributeSupplierComp(cToken, minter);
+        // updateCompSupplyIndex(cAsset);
+        // distributeSupplierComp(cAsset, minter);
 
         return uint(Error.NO_ERROR);
     }
 
     /**
-     * @notice Validates mint and reverts on rejection. May emit logs.
-     * @param cToken Asset being minted
-     * @param minter The address minting the tokens
-     * @param actualMintAmount The amount of the underlying asset being minted
-     * @param mintTokens The number of tokens being minted
-     */
-    function mintVerify(address cToken, address minter, uint actualMintAmount, uint mintTokens) external {
-        // Shh - currently unused
-        cToken;
-        minter;
-        actualMintAmount;
-        mintTokens;
-
-        // Shh - we don't ever want this hook to be marked pure
-        if (false) {
-            maxAssets = maxAssets;
-        }
-    }
-
-    /**
      * @notice Checks if the account should be allowed to redeem tokens in the given market
-     * @param cToken The market to verify the redeem against
+     * @param cAsset The market to verify the redeem against
      * @param redeemer The account which would redeem the tokens
      * @param redeemTokens The number of cTokens to exchange for the underlying asset in the market
      * @return 0 if the redeem is allowed, otherwise a semi-opaque error code (See ErrorReporter.sol)
      */
-    function redeemAllowed(address cToken, address redeemer, uint redeemTokens) external returns (uint) {
-        uint allowed = redeemAllowedInternal(cToken, redeemer, redeemTokens);
+    function redeemAllowed(address cAsset, address redeemer, uint redeemTokens) external returns (uint) {
+        uint allowed = redeemAllowedInternal(cAsset, redeemer, redeemTokens);
         if (allowed != uint(Error.NO_ERROR)) {
             return allowed;
         }
 
         // Keep the flywheel moving
-        updateCompSupplyIndex(cToken);
-        distributeSupplierComp(cToken, redeemer);
+        // updateCompSupplyIndex(cAsset);
+        // distributeSupplierComp(cAsset, redeemer);
 
         return uint(Error.NO_ERROR);
     }
@@ -286,12 +270,12 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
         }
 
         /* If the redeemer is not 'in' the market, then we can bypass the liquidity check */
-        if (!markets[cToken].accountMembership[redeemer]) {
+        if (cToken != address(nftMarket) && !markets[cToken].accountMembership[redeemer]) {
             return uint(Error.NO_ERROR);
         }
 
         /* Otherwise, perform a hypothetical liquidity check to guard against shortfall */
-        (Error err, , uint shortfall) = getHypotheticalAccountLiquidityInternal(redeemer, CToken(cToken), redeemTokens, 0);
+        (Error err, , uint shortfall) = getHypotheticalAccountLiquidityInternal(redeemer, cToken, redeemTokens, 0);
         if (err != Error.NO_ERROR) {
             return uint(err);
         }
@@ -362,7 +346,7 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
             require(nextTotalBorrows < borrowCap, "market borrow cap reached");
         }
 
-        (Error err, , uint shortfall) = getHypotheticalAccountLiquidityInternal(borrower, CToken(cToken), 0, borrowAmount);
+        (Error err, , uint shortfall) = getHypotheticalAccountLiquidityInternal(borrower, cToken, 0, borrowAmount);
         if (err != Error.NO_ERROR) {
             return uint(err);
         }
@@ -376,24 +360,6 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
         distributeBorrowerComp(cToken, borrower, borrowIndex);
 
         return uint(Error.NO_ERROR);
-    }
-
-    /**
-     * @notice Validates borrow and reverts on rejection. May emit logs.
-     * @param cToken Asset whose underlying is being borrowed
-     * @param borrower The address borrowing the underlying
-     * @param borrowAmount The amount of the underlying asset requested to borrow
-     */
-    function borrowVerify(address cToken, address borrower, uint borrowAmount) external {
-        // Shh - currently unused
-        cToken;
-        borrower;
-        borrowAmount;
-
-        // Shh - we don't ever want this hook to be marked pure
-        if (false) {
-            maxAssets = maxAssets;
-        }
     }
 
     /**
@@ -427,32 +393,6 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
     }
 
     /**
-     * @notice Validates repayBorrow and reverts on rejection. May emit logs.
-     * @param cToken Asset being repaid
-     * @param payer The address repaying the borrow
-     * @param borrower The address of the borrower
-     * @param actualRepayAmount The amount of underlying being repaid
-     */
-    function repayBorrowVerify(
-        address cToken,
-        address payer,
-        address borrower,
-        uint actualRepayAmount,
-        uint borrowerIndex) external {
-        // Shh - currently unused
-        cToken;
-        payer;
-        borrower;
-        actualRepayAmount;
-        borrowerIndex;
-
-        // Shh - we don't ever want this hook to be marked pure
-        if (false) {
-            maxAssets = maxAssets;
-        }
-    }
-
-    /**
      * @notice Checks if the liquidation should be allowed to occur
      * @param cTokenBorrowed Asset which was borrowed by the borrower
      * @param cTokenCollateral Asset which was used as collateral and will be seized
@@ -469,7 +409,7 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
         // Shh - currently unused
         liquidator;
 
-        if (!markets[cTokenBorrowed].isListed || !markets[cTokenCollateral].isListed) {
+        if (!markets[cTokenBorrowed].isListed || !markets[cTokenCollateral].isListed && cTokenCollateral != address(nftMarket)) {
             return uint(Error.MARKET_NOT_LISTED);
         }
 
@@ -496,35 +436,6 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
             }
         }
         return uint(Error.NO_ERROR);
-    }
-
-    /**
-     * @notice Validates liquidateBorrow and reverts on rejection. May emit logs.
-     * @param cTokenBorrowed Asset which was borrowed by the borrower
-     * @param cTokenCollateral Asset which was used as collateral and will be seized
-     * @param liquidator The address repaying the borrow and seizing the collateral
-     * @param borrower The address of the borrower
-     * @param actualRepayAmount The amount of underlying being repaid
-     */
-    function liquidateBorrowVerify(
-        address cTokenBorrowed,
-        address cTokenCollateral,
-        address liquidator,
-        address borrower,
-        uint actualRepayAmount,
-        uint seizeTokens) external {
-        // Shh - currently unused
-        cTokenBorrowed;
-        cTokenCollateral;
-        liquidator;
-        borrower;
-        actualRepayAmount;
-        seizeTokens;
-
-        // Shh - we don't ever want this hook to be marked pure
-        if (false) {
-            maxAssets = maxAssets;
-        }
     }
 
     /**
@@ -556,85 +467,38 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
         }
 
         // Keep the flywheel moving
-        updateCompSupplyIndex(cTokenCollateral);
-        distributeSupplierComp(cTokenCollateral, borrower);
-        distributeSupplierComp(cTokenCollateral, liquidator);
+        // updateCompSupplyIndex(cTokenCollateral);
+        // distributeSupplierComp(cTokenCollateral, borrower);
+        // distributeSupplierComp(cTokenCollateral, liquidator);
 
         return uint(Error.NO_ERROR);
     }
 
     /**
-     * @notice Validates seize and reverts on rejection. May emit logs.
-     * @param cTokenCollateral Asset which was used as collateral and will be seized
-     * @param cTokenBorrowed Asset which was borrowed by the borrower
-     * @param liquidator The address repaying the borrow and seizing the collateral
-     * @param borrower The address of the borrower
-     * @param seizeTokens The number of collateral tokens to seize
-     */
-    function seizeVerify(
-        address cTokenCollateral,
-        address cTokenBorrowed,
-        address liquidator,
-        address borrower,
-        uint seizeTokens) external {
-        // Shh - currently unused
-        cTokenCollateral;
-        cTokenBorrowed;
-        liquidator;
-        borrower;
-        seizeTokens;
-
-        // Shh - we don't ever want this hook to be marked pure
-        if (false) {
-            maxAssets = maxAssets;
-        }
-    }
-
-    /**
      * @notice Checks if the account should be allowed to transfer tokens in the given market
-     * @param cToken The market to verify the transfer against
+     * @param cAsset The market to verify the transfer against
      * @param src The account which sources the tokens
      * @param dst The account which receives the tokens
      * @param transferTokens The number of cTokens to transfer
      * @return 0 if the transfer is allowed, otherwise a semi-opaque error code (See ErrorReporter.sol)
      */
-    function transferAllowed(address cToken, address src, address dst, uint transferTokens) external returns (uint) {
+    function transferAllowed(address cAsset, address src, address dst, uint transferTokens) external returns (uint) {
         // Pausing is a very serious situation - we revert to sound the alarms
         require(!transferGuardianPaused, "transfer is paused");
 
         // Currently the only consideration is whether or not
         //  the src is allowed to redeem this many tokens
-        uint allowed = redeemAllowedInternal(cToken, src, transferTokens);
+        uint allowed = redeemAllowedInternal(cAsset, src, transferTokens);
         if (allowed != uint(Error.NO_ERROR)) {
             return allowed;
         }
 
         // Keep the flywheel moving
-        updateCompSupplyIndex(cToken);
-        distributeSupplierComp(cToken, src);
-        distributeSupplierComp(cToken, dst);
+        // updateCompSupplyIndex(cAsset);
+        // distributeSupplierComp(cAsset, src);
+        // distributeSupplierComp(cAsset, dst);
 
         return uint(Error.NO_ERROR);
-    }
-
-    /**
-     * @notice Validates transfer and reverts on rejection. May emit logs.
-     * @param cToken Asset being transferred
-     * @param src The account which sources the tokens
-     * @param dst The account which receives the tokens
-     * @param transferTokens The number of cTokens to transfer
-     */
-    function transferVerify(address cToken, address src, address dst, uint transferTokens) external {
-        // Shh - currently unused
-        cToken;
-        src;
-        dst;
-        transferTokens;
-
-        // Shh - we don't ever want this hook to be marked pure
-        if (false) {
-            maxAssets = maxAssets;
-        }
     }
 
     /*** Liquidity/Liquidation Calculations ***/
@@ -651,9 +515,12 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
         uint borrowBalance;
         uint exchangeRateMantissa;
         uint oraclePriceMantissa;
+        uint nftOraclePriceMantissa;
         Exp collateralFactor;
+        Exp nftCollateralFactor;
         Exp exchangeRate;
         Exp oraclePrice;
+        Exp nftOraclePrice;
         Exp tokensToDenom;
     }
 
@@ -664,7 +531,7 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
      *          account shortfall below collateral requirements)
      */
     function getAccountLiquidity(address account) public view returns (uint, uint, uint) {
-        (Error err, uint liquidity, uint shortfall) = getHypotheticalAccountLiquidityInternal(account, CToken(0), 0, 0);
+        (Error err, uint liquidity, uint shortfall) = getHypotheticalAccountLiquidityInternal(account, address(0), 0, 0);
 
         return (uint(err), liquidity, shortfall);
     }
@@ -676,12 +543,12 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
      *          account shortfall below collateral requirements)
      */
     function getAccountLiquidityInternal(address account) internal view returns (Error, uint, uint) {
-        return getHypotheticalAccountLiquidityInternal(account, CToken(0), 0, 0);
+        return getHypotheticalAccountLiquidityInternal(account, address(0), 0, 0);
     }
 
     /**
      * @notice Determine what the account liquidity would be if the given amounts were redeemed/borrowed
-     * @param cTokenModify The market to hypothetically redeem/borrow in
+     * @param cAssetModify The market to hypothetically redeem/borrow in
      * @param account The account to determine liquidity for
      * @param redeemTokens The number of tokens to hypothetically redeem
      * @param borrowAmount The amount of underlying to hypothetically borrow
@@ -691,16 +558,16 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
      */
     function getHypotheticalAccountLiquidity(
         address account,
-        address cTokenModify,
+        address cAssetModify,
         uint redeemTokens,
         uint borrowAmount) public view returns (uint, uint, uint) {
-        (Error err, uint liquidity, uint shortfall) = getHypotheticalAccountLiquidityInternal(account, CToken(cTokenModify), redeemTokens, borrowAmount);
+        (Error err, uint liquidity, uint shortfall) = getHypotheticalAccountLiquidityInternal(account, cAssetModify, redeemTokens, borrowAmount);
         return (uint(err), liquidity, shortfall);
     }
 
     /**
      * @notice Determine what the account liquidity would be if the given amounts were redeemed/borrowed
-     * @param cTokenModify The market to hypothetically redeem/borrow in
+     * @param cAssetModify The market to hypothetically redeem/borrow in
      * @param account The account to determine liquidity for
      * @param redeemTokens The number of tokens to hypothetically redeem
      * @param borrowAmount The amount of underlying to hypothetically borrow
@@ -712,7 +579,7 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
      */
     function getHypotheticalAccountLiquidityInternal(
         address account,
-        CToken cTokenModify,
+        address cAssetModify,
         uint redeemTokens,
         uint borrowAmount) internal view returns (Error, uint, uint) {
 
@@ -748,8 +615,8 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
             // sumBorrowPlusEffects += oraclePrice * borrowBalance
             vars.sumBorrowPlusEffects = mul_ScalarTruncateAddUInt(vars.oraclePrice, vars.borrowBalance, vars.sumBorrowPlusEffects);
 
-            // Calculate effects of interacting with cTokenModify
-            if (asset == cTokenModify) {
+            // Calculate effects of interacting with cAssetModify
+            if (address(asset) == cAssetModify) {
                 // redeem effect
                 // sumBorrowPlusEffects += tokensToDenom * redeemTokens
                 vars.sumBorrowPlusEffects = mul_ScalarTruncateAddUInt(vars.tokensToDenom, redeemTokens, vars.sumBorrowPlusEffects);
@@ -757,6 +624,25 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
                 // borrow effect
                 // sumBorrowPlusEffects += oraclePrice * borrowAmount
                 vars.sumBorrowPlusEffects = mul_ScalarTruncateAddUInt(vars.oraclePrice, borrowAmount, vars.sumBorrowPlusEffects);
+            }
+        }
+
+        uint256 nftBalance = nftMarket.totalBalance(account);
+        if (nftBalance > 0) {
+            // Get the price of the NFT and the collateral factor
+            vars.nftOraclePriceMantissa =  nftOracle.getUnderlyingPrice(nftMarket);
+            if (vars.nftOraclePriceMantissa == 0) {
+                return (Error.PRICE_ERROR, 0, 0);
+            }
+            vars.nftOraclePrice = Exp({mantissa: vars.nftOraclePriceMantissa});
+            vars.nftCollateralFactor = Exp({mantissa: markets[address(nftMarket)].collateralFactorMantissa});
+
+            // sumCollateral += nftOraclePrice * collateralFactor * nftBalance
+            vars.sumCollateral = mul_ScalarTruncateAddUInt(mul_(vars.nftOraclePrice, markets[address(nftMarket)].collateralFactorMantissa), nftBalance, vars.sumCollateral);
+            if (cAssetModify == address(nftMarket)) {
+                require(borrowAmount == 0, "cannot borrow NFT");
+                // sumBorrowPlusEffects += nftOraclePrice * collateralFactor * redeemTokens
+                vars.sumBorrowPlusEffects = mul_ScalarTruncateAddUInt(mul_(vars.nftOraclePrice, markets[address(nftMarket)].collateralFactorMantissa), redeemTokens, vars.sumBorrowPlusEffects);
             }
         }
 
@@ -805,7 +691,47 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
         return (uint(Error.NO_ERROR), seizeTokens);
     }
 
+    /**
+     * @notice Calculate number of cNFT tokens to seize given an underlying amount
+     * @dev Used in liquidation (called in cToken.liquidateBorrowFreshNft)
+     * @param cTokenBorrowed The address of the borrowed cToken
+     * @param actualRepayAmount The amount of cTokenBorrowed underlying to convert into NFTs
+     * @return (errorCode, number of cNft tokens to be seized in a liquidation)
+     */
+    function liquidateCalculateSeizeNfts(address cTokenBorrowed, address cNftCollateral, uint actualRepayAmount) external view returns (uint, uint) {
+        require(cNftCollateral == address(nftMarket), "cNFT is from the wrong comptroller");
+
+        /* Read oracle prices for borrowed and collateral markets */
+        uint priceBorrowedMantissa = oracle.getUnderlyingPrice(CToken(cTokenBorrowed));
+        uint priceCollateralMantissa = nftOracle.getUnderlyingPrice(nftMarket);
+        if (priceBorrowedMantissa == 0 || priceCollateralMantissa == 0) {
+            return (uint(Error.PRICE_ERROR), 0);
+        }
+
+        /*
+         * Get the exchange rate and calculate the number of collateral tokens to seize:
+         *  seizeTokens = actualRepayAmount * liquidationIncentive * priceBorrowed / priceCollateral
+         */
+        uint seizeTokens;
+        Exp memory numerator;
+        Exp memory denominator;
+        Exp memory ratio;
+
+        numerator = mul_(Exp({mantissa: liquidationIncentiveMantissa}), Exp({mantissa: priceBorrowedMantissa}));
+        denominator = Exp({mantissa: priceCollateralMantissa});
+        ratio = div_(numerator, denominator);
+
+        seizeTokens = truncate(mul_(ratio, Exp({mantissa: actualRepayAmount})));
+
+        return (uint(Error.NO_ERROR), seizeTokens);
+    }
+
     /*** Admin Functions ***/
+
+    function _changeAdmin(address newAdmin) external {
+        require(msg.sender == admin, "Only admin can change the admin");
+        admin = newAdmin;
+    }
 
     /**
       * @notice Sets a new price oracle for the comptroller
@@ -826,6 +752,23 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
 
         // Emit NewPriceOracle(oldOracle, newOracle)
         emit NewPriceOracle(oldOracle, newOracle);
+
+        return uint(Error.NO_ERROR);
+    }
+
+    /**
+      * @notice Sets a new price oracle for the comptroller
+      * @dev Admin function to set a new price oracle
+      * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
+      */
+    function _setNftPriceOracle(NftPriceOracle newOracle) public returns (uint) {
+        // Check caller is admin
+        if (msg.sender != admin) {
+            return fail(Error.UNAUTHORIZED, FailureInfo.SET_PRICE_ORACLE_OWNER_CHECK);
+        }
+
+        // Set comptroller's nft oracle to newOracle
+        nftOracle = newOracle;
 
         return uint(Error.NO_ERROR);
     }
@@ -885,6 +828,47 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
 
         // Emit event with asset, old collateral factor, and new collateral factor
         emit NewCollateralFactor(cToken, oldCollateralFactorMantissa, newCollateralFactorMantissa);
+
+        return uint(Error.NO_ERROR);
+    }
+
+    /**
+      * @notice Sets the collateralFactor for the NFT
+      * @dev Admin function to set per-market collateralFactor
+      * @param newCollateralFactorMantissa The new collateral factor, scaled by 1e18
+      * @return uint 0=success, otherwise a failure. (See ErrorReporter for details)
+      */
+    function _setNftCollateralFactor(uint newCollateralFactorMantissa) external returns (uint) {
+        // Check caller is admin
+        if (msg.sender != admin) {
+            return fail(Error.UNAUTHORIZED, FailureInfo.SET_COLLATERAL_FACTOR_OWNER_CHECK);
+        }
+
+        // Verify market is listed
+        Market storage market = markets[address(nftMarket)];
+        if (!market.isListed) {
+            return fail(Error.MARKET_NOT_LISTED, FailureInfo.SET_COLLATERAL_FACTOR_NO_EXISTS);
+        }
+
+        Exp memory newCollateralFactorExp = Exp({mantissa: newCollateralFactorMantissa});
+
+        // Check collateral factor <= 0.9
+        Exp memory highLimit = Exp({mantissa: collateralFactorMaxMantissa});
+        if (lessThanExp(highLimit, newCollateralFactorExp)) {
+            return fail(Error.INVALID_COLLATERAL_FACTOR, FailureInfo.SET_COLLATERAL_FACTOR_VALIDATION);
+        }
+
+        // If collateral factor != 0, fail if price == 0
+        if (newCollateralFactorMantissa != 0 && nftOracle.getUnderlyingPrice(nftMarket) == 0) {
+            return fail(Error.PRICE_ERROR, FailureInfo.SET_COLLATERAL_FACTOR_WITHOUT_PRICE);
+        }
+
+        // Set market's collateral factor to new collateral factor, remember old value
+        uint oldCollateralFactorMantissa = market.collateralFactorMantissa;
+        market.collateralFactorMantissa = newCollateralFactorMantissa;
+
+        // Emit event with asset, old collateral factor, and new collateral factor
+        emit NewNftCollateralFactor(oldCollateralFactorMantissa, newCollateralFactorMantissa);
 
         return uint(Error.NO_ERROR);
     }
@@ -1007,13 +991,17 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
         return uint(Error.NO_ERROR);
     }
 
-    function _setMintPaused(CToken cToken, bool state) public returns (bool) {
-        require(markets[address(cToken)].isListed, "cannot pause a market that is not listed");
+    function _setMintPaused(address cAsset, bool state) public returns (bool) {
+        require(markets[cAsset].isListed, "cannot pause a market that is not listed");
         require(msg.sender == pauseGuardian || msg.sender == admin, "only pause guardian and admin can pause");
         require(msg.sender == admin || state == true, "only admin can unpause");
 
-        mintGuardianPaused[address(cToken)] = state;
-        emit ActionPaused(cToken, "Mint", state);
+        mintGuardianPaused[cAsset] = state;
+        if (cAsset == address(nftMarket)) {
+            emit ActionPaused("Mint NFT", state);
+        } else {
+            emit ActionPaused(CToken(cAsset), "Mint", state);
+        }
         return state;
     }
 
@@ -1262,7 +1250,7 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
      * @return The amount of COMP which was NOT transferred to the user
      */
     function grantCompInternal(address user, uint amount) internal returns (uint) {
-        Comp comp = Comp(getCompAddress());
+        Comp comp = Comp(compAddress);
         uint compRemaining = comp.balanceOf(address(this));
         if (amount > 0 && amount <= compRemaining) {
             comp.transfer(user, amount);
@@ -1344,10 +1332,29 @@ contract Comptroller is ComptrollerV5Storage, ComptrollerInterface, ComptrollerE
     }
 
     /**
-     * @notice Return the address of the COMP token
-     * @return The address of COMP
+     * @notice This function should only be called once on initialization.
      */
-    function getCompAddress() public view returns (address) {
-        return 0xc00e94Cb662C3520282E6f5717214004A7f26888;
+    function _initializeNftCollateral(CNftInterface cNft, NftPriceOracle _nftOracle, uint256 _collateralFactorMantissa) external returns (uint) {
+        require(address(nftMarket) == address(0), "nft collateral already initialized");
+        require(address(cNft) != address(0), "cannot initialize nft market to the 0 address");
+
+        if (msg.sender != admin) {
+            return fail(Error.UNAUTHORIZED, FailureInfo.SUPPORT_MARKET_OWNER_CHECK);
+        }
+
+        if (markets[address(cNft)].isListed) {
+            return fail(Error.MARKET_ALREADY_LISTED, FailureInfo.SUPPORT_MARKET_EXISTS);
+        }
+
+        cNft.isCNft(); // Sanity check to make sure its really a cNFT.
+
+        nftMarket = cNft;
+        nftOracle = _nftOracle;
+
+        // Note that isComped is not in active use anymore
+        markets[address(cNft)] = Market({isListed: true, isComped: false, collateralFactorMantissa: _collateralFactorMantissa});
+
+        // We do not support borrowing NFTs.
+        borrowGuardianPaused[address(cNft)] = false;
     }
 }

@@ -114,6 +114,21 @@ contract CErc20 is CToken, CErc20Interface {
     }
 
     /**
+     * @notice The sender liquidates the borrowers collateral.
+     *  The collateral seized is transferred to the liquidator.
+     * @param borrower The borrower of this cToken to be liquidated
+     * @param repayAmount The amount of the underlying borrowed asset to repay
+     * @param cNftCollateral The market in which to seize collateral from the borrower
+     * @param seizeIds The IDs of the NFT to seize.
+     * @param seizeAmounts The amount of each ID of NFT to seize.
+     * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
+     */
+    function liquidateBorrowNft(address borrower, uint repayAmount, CNftInterface cNftCollateral, uint[] calldata seizeIds, uint[] calldata seizeAmounts) external returns (uint) {
+        (uint err,) = liquidateBorrowNftInternal(borrower, repayAmount, cNftCollateral, seizeIds, seizeAmounts);
+        return err;
+    }
+
+    /**
      * @notice A public function to sweep accidental ERC-20 transfers to this contract. Tokens are sent to admin (timelock)
      * @param token The address of the ERC-20 token to sweep
      */

@@ -107,6 +107,20 @@ contract CEther is CToken {
     }
 
     /**
+     * @notice The sender liquidates the borrowers NFT collateral.
+     *  The collateral seized is transferred to the liquidator.
+     * @dev Reverts upon any failure
+     * @param borrower The borrower of this cToken to be liquidated
+     * @param cNftCollateral The market in which to seize collateral from the borrower
+     * @param seizeIds The IDs of the NFT to seize.
+     * @param seizeAmounts The amount of each ID of NFT to seize.
+     */
+    function liquidateBorrowNft(address borrower, CNftInterface cNftCollateral, uint[] calldata seizeIds, uint[] calldata seizeAmounts) external payable {
+        (uint err,) = liquidateBorrowNftInternal(borrower, msg.value, cNftCollateral, seizeIds, seizeAmounts);
+        requireNoError(err, "liquidateBorrow failed");
+    }
+
+    /**
      * @notice The sender adds to reserves.
      * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
      */
